@@ -17,10 +17,14 @@ def get_live_spot(ticker):
 
 @st.cache_data(ttl=300)
 def get_options_chain(ticker, date=None):
-    tkr = yf.Ticker(ticker)
-    exps = tkr.options
-    if not exps: return None, None
-    return exps, tkr.option_chain(date or exps[0]).puts
+    try:
+        tkr = yf.Ticker(ticker)
+        exps = tkr.options
+        if not exps: return None, None
+        return exps, tkr.option_chain(date or exps[0]).puts
+    except Exception:
+        # Gère l'erreur Rate Limit de Yahoo Finance
+        return None, None
 
 @st.cache_resource
 def load_finbert():
@@ -79,29 +83,31 @@ with col2:
 
 st.markdown("---")
 st.subheader("📋 Chaîne d'Options Réelle & Calibration")
-exps, puts = get_options_chain(ticker)
 
 if 'calibrated' not in st.session_state:
     st.session_state.calibrated = False
 
-if exps:
+exps, puts = get_options_chain(ticker)
+
+if exps is None:
+    # Message d'erreur élégant sans crash
+    st.error("⚠️ Yahoo Finance a bloqué la requête (Rate Limit). L'API est saturée sur le serveur Streamlit Cloud.")
+    st.session_state.calibrated = False
+elif exps:
     selected_exp = st.selectbox("Maturité", exps)
     _, puts = get_options_chain(ticker, selected_exp)
     
-    # Bouton de calibration
-    if st.button("⚙️ Calibrer sur le marché live (Scipy Optimize)"):
+    if st.button("⚙️ Calibrer sur le marché live"):
         with st.spinner("Calibration en cours..."):
-            # Filtrer les options proches de la monnaie pour éviter les erreurs d'optimisation
             atm_puts = puts[(puts['strike'] >= live_S * 0.8) & (puts['strike'] <= live_S * 1.2) & (puts['volume'] > 0)]
             if not atm_puts.empty:
                 K_list = atm_puts['strike'].values
                 market_P = atm_puts['lastPrice'].values
-                T_calib = 0.5 # Approximation temps
+                T_calib = 0.5 
                 
                 def loss(p):
                     sig, l, mj, sj = p
-                    err = sum((price_mjd_put(live_S, k, T_calib, 0.05, sig, l, mj, sj) - mp)**2 for k, mp in zip(K_list, market_P))
-                    return err
+                    return sum((price_mjd_put(live_S, k, T_calib, 0.05, sig, l, mj, sj) - mp)**2 for k, mp in zip(K_list, market_P))
                 
                 res = minimize(loss, [0.2, dynamic_lam, -0.2, 0.15], bounds=((0.01, 1), (0, 10), (-1, 1), (0.01, 1)))
                 st.session_state.opt_params = res.x
@@ -112,7 +118,7 @@ if exps:
 
     st.dataframe(puts[['strike', 'lastPrice', 'bid', 'ask', 'impliedVolatility', 'volume']].head(5), use_container_width=True)
 
-# Application des paramètres (manuels ou calibrés)
+# Application des paramètres
 st.markdown("---")
 col_p, col_j = st.columns(2)
 
