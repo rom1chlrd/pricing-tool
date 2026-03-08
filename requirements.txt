@@ -6,3 +6,4 @@ requests
 yfinance
 transformers
 torch
+pandas
