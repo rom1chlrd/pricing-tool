@@ -1,5 +1,6 @@
 import streamlit as st
 import numpy as np
+import pandas as pd
 import plotly.graph_objects as go
 from scipy.stats import norm
 from scipy.optimize import minimize
@@ -12,19 +13,36 @@ st.set_page_config(page_title="Pricer Pro", layout="wide")
 # --- 1. DONNÉES & IA ---
 @st.cache_data(ttl=300)
 def get_live_spot(ticker):
-    try: return yf.Ticker(ticker).history(period="1d")['Close'].iloc[-1]
+    try: return float(yf.Ticker(ticker).history(period="1d")['Close'].iloc[-1])
     except: return 100.0
 
+def bs_put_simple(S, K, T, r, sigma):
+    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+    d2 = d1 - sigma * np.sqrt(T)
+    return K * np.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
+
 @st.cache_data(ttl=300)
-def get_options_chain(ticker, date=None):
+def get_options_chain(ticker, S_ref, date=None):
     try:
         tkr = yf.Ticker(ticker)
         exps = tkr.options
-        if not exps: return None, None
+        if not exps: raise ValueError("Pas d'options")
         return exps, tkr.option_chain(date or exps[0]).puts
     except Exception:
-        # Gère l'erreur Rate Limit de Yahoo Finance
-        return None, None
+        st.toast("Yahoo API bloquée. Données simulées pour la démo.")
+        strikes = np.round(np.linspace(S_ref * 0.8, S_ref * 1.2, 15), 2)
+        vols = 0.20 + 0.15 * (strikes / S_ref - 1)**2
+        prices = [bs_put_simple(S_ref, k, 0.5, 0.05, v) for k, v in zip(strikes, vols)]
+        
+        df = pd.DataFrame({
+            'strike': strikes,
+            'lastPrice': np.round(prices, 2),
+            'bid': np.round(np.array(prices) - 0.1, 2),
+            'ask': np.round(np.array(prices) + 0.1, 2),
+            'impliedVolatility': np.round(vols, 4),
+            'volume': np.random.randint(10, 500, size=len(strikes))
+        })
+        return ["Données Simulées (Rate Limit)"], df
 
 @st.cache_resource
 def load_finbert():
@@ -61,7 +79,7 @@ def price_mjd_put(S, K, T, r, sigma, lam, mu_J, sigma_J):
     return np.exp(-r * T) * np.mean(np.maximum(K - paths[:, -1], 0))
 
 # --- UI & CALIBRATION ---
-st.title("🦅 Pricer Institutionnel : MJD, FinBERT & Calibration Auto")
+st.title("Pricer Institutionnel : MJD & Calibration Auto")
 
 try: api_key = st.secrets["NEWS_API_KEY"]
 except: api_key = None
@@ -76,28 +94,24 @@ with col1:
 dynamic_lam, top_news = fetch_finbert_sentiment(api_key, query)
 
 with col2:
-    st.subheader("🧠 Analyse FinBERT")
+    st.subheader("Analyse FinBERT")
     for news in top_news:
         color = "red" if news['sentiment'] == 'negative' else "green" if news['sentiment'] == 'positive' else "gray"
         st.markdown(f"- 🔗 [{news['title']}]({news['url']}) - **:{color}[{news['sentiment'].upper()}]**")
 
 st.markdown("---")
-st.subheader("📋 Chaîne d'Options Réelle & Calibration")
+st.subheader("Chaîne d'Options Réelle & Calibration")
 
 if 'calibrated' not in st.session_state:
     st.session_state.calibrated = False
 
-exps, puts = get_options_chain(ticker)
+exps, puts = get_options_chain(ticker, live_S)
 
-if exps is None:
-    # Message d'erreur élégant sans crash
-    st.error("⚠️ Yahoo Finance a bloqué la requête (Rate Limit). L'API est saturée sur le serveur Streamlit Cloud.")
-    st.session_state.calibrated = False
-elif exps:
+if exps:
     selected_exp = st.selectbox("Maturité", exps)
-    _, puts = get_options_chain(ticker, selected_exp)
+    _, puts = get_options_chain(ticker, live_S, selected_exp)
     
-    if st.button("⚙️ Calibrer sur le marché live"):
+    if st.button("Calibrer sur le marché live"):
         with st.spinner("Calibration en cours..."):
             atm_puts = puts[(puts['strike'] >= live_S * 0.8) & (puts['strike'] <= live_S * 1.2) & (puts['volume'] > 0)]
             if not atm_puts.empty:
